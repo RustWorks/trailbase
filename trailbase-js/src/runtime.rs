@@ -1,13 +1,18 @@
 use futures_util::future::LocalBoxFuture;
 use log::*;
+use parking_lot::Mutex;
+use rusqlite::Transaction;
 use rustyscript::{deno_core::PollEventLoopOptions, init_platform, js_value::Promise};
+use self_cell::{MutBorrow, self_cell};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tracing_subscriber::prelude::*;
+use trailbase_sqlite::Params;
+use trailbase_sqlite::connection::LockGuard;
 use trailbase_sqlite::rows::{JsonError, row_to_json_array};
 
 use crate::JsRuntimeAssets;
@@ -416,6 +421,26 @@ impl RuntimeHandle {
   }
 }
 
+self_cell!(
+  struct OwnedLock {
+    owner: trailbase_sqlite::Connection,
+
+    #[covariant]
+    dependent: LockGuard,
+  }
+);
+
+struct OwnedLockWrapper(OwnedLock);
+
+self_cell!(
+  struct OwnedTransaction {
+    owner: MutBorrow<OwnedLockWrapper>,
+
+    #[covariant]
+    dependent: Transaction,
+  }
+);
+
 pub fn register_database_functions(handle: &RuntimeHandle, conn: trailbase_sqlite::Connection) {
   fn register(runtime: &mut Runtime, conn: trailbase_sqlite::Connection) -> Result<(), Error> {
     let conn_clone = conn.clone();
@@ -457,6 +482,69 @@ pub fn register_database_functions(handle: &RuntimeHandle, conn: trailbase_sqlit
         return Ok(serde_json::Value::Number(rows_affected.into()));
       })
     })?;
+
+    let current_transaction: Arc<Mutex<Option<OwnedTransaction>>> = Arc::new(Mutex::new(None));
+    let current_transaction_clone = current_transaction.clone();
+    runtime.register_function("transaction_begin", move |_args: &[serde_json::Value]| {
+      let lock = OwnedLock::new(conn.clone(), |owner| owner.write_lock());
+      // Ideally, we'd use .transaction(), just haven't managed to get a mutable reference to the
+      // Connection lock. RefCell might do the trick.
+      let tx = OwnedTransaction::new(MutBorrow::new(OwnedLockWrapper(lock)), |lock| {
+        lock
+          .borrow_mut()
+          .0
+          .borrow_dependent()
+          .unchecked_transaction()
+          .unwrap()
+      });
+
+      *current_transaction_clone.lock() = Some(tx);
+
+      return Ok(serde_json::Value::Null);
+    })?;
+
+    let current_transaction_clone = current_transaction.clone();
+    runtime.register_function("transaction_query", move |args: &[serde_json::Value]| {
+      let query: String = get_arg(args, 0)?;
+      let params = json_values_to_params(get_arg(args, 1)?)?;
+
+      let tx = current_transaction_clone.lock();
+      if let Some(tx) = &*tx {
+        let mut stmt = tx.borrow_dependent().prepare(&query).unwrap();
+        params.bind(&mut stmt).unwrap();
+        let mut rows = stmt.raw_query();
+        let _row = rows.next().unwrap();
+
+        // FIXME: row.
+      }
+      return Ok(serde_json::Value::Null);
+    })?;
+
+    let current_transaction_clone = current_transaction.clone();
+    runtime.register_function(
+      "transaction_commit",
+      move |_args: &[serde_json::Value]| {
+        let tx = current_transaction_clone.lock().take();
+        if let Some(tx) = tx {
+          // NOTE: this is the same as `tx.commit()` just w/o consuming.
+          tx.borrow_dependent().execute_batch("COMMIT").unwrap();
+        }
+        return Ok(serde_json::Value::Null);
+      },
+    )?;
+
+    let current_transaction_clone = current_transaction.clone();
+    runtime.register_function(
+      "transaction_rollback",
+      move |_args: &[serde_json::Value]| {
+        let tx = current_transaction_clone.lock().take();
+        if let Some(tx) = tx {
+          // NOTE: this is the same as `tx.rollback()` just w/o consuming.
+          tx.borrow_dependent().execute_batch("ROLLBACK").unwrap();
+        }
+        return Ok(serde_json::Value::Null);
+      },
+    )?;
 
     return Ok(());
   }
