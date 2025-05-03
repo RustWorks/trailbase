@@ -709,6 +709,44 @@ export async function query(
   return await rustyscript.async_functions.query(queryStr, params);
 }
 
+export class Transaction {
+  finalized: boolean;
+
+  constructor() {
+    this.finalized = false;
+  }
+
+  public query(queryStr: string, params: unknown[]): void {
+    rustyscript.functions.transaction_query(queryStr, params);
+  }
+
+  public commit(): void {
+    this.finalized = true;
+    rustyscript.functions.transaction_commit();
+  }
+
+  public rollback(): void {
+    this.finalized = true;
+    rustyscript.functions.transaction_rollback();
+  }
+}
+
+export function transaction<T>(f: (tx: Transaction) => T): T {
+  rustyscript.functions.transaction_begin();
+
+  const tx = new Transaction();
+  try {
+    const r = f(tx);
+    if (!tx.finalized) {
+      rustyscript.functions.transaction_rollback();
+    }
+    return r;
+  } catch (e) {
+    rustyscript.functions.transaction_rollback();
+    throw e;
+  }
+}
+
 /// Executes given query against SQLite database.
 export async function execute(
   queryStr: string,

@@ -486,6 +486,8 @@ pub fn register_database_functions(handle: &RuntimeHandle, conn: trailbase_sqlit
     let current_transaction: Arc<Mutex<Option<OwnedTransaction>>> = Arc::new(Mutex::new(None));
     let current_transaction_clone = current_transaction.clone();
     runtime.register_function("transaction_begin", move |_args: &[serde_json::Value]| {
+      assert!(current_transaction_clone.lock().is_none());
+
       let lock = OwnedLock::new(conn.clone(), |owner| owner.write_lock());
       // Ideally, we'd use .transaction(), just haven't managed to get a mutable reference to the
       // Connection lock. RefCell might do the trick.
