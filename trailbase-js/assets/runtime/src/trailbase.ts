@@ -703,10 +703,15 @@ export function addPeriodicCallback(
 
 /// Queries the SQLite database.
 export async function query(
-  queryStr: string,
+  sql: string,
   params: unknown[],
 ): Promise<unknown[][]> {
-  return await rustyscript.async_functions.query(queryStr, params);
+  return await rustyscript.async_functions.query(sql, params);
+}
+
+/// Executes given query against SQLite database.
+export async function execute(sql: string, params: unknown[]): Promise<number> {
+  return await rustyscript.async_functions.execute(sql, params);
 }
 
 export class Transaction {
@@ -716,8 +721,12 @@ export class Transaction {
     this.finalized = false;
   }
 
-  public query(queryStr: string, params: unknown[]): void {
-    rustyscript.functions.transaction_query(queryStr, params);
+  public query(queryStr: string, params: unknown[]): unknown[][] {
+    return rustyscript.functions.transaction_query(queryStr, params);
+  }
+
+  public execute(queryStr: string, params: unknown[]): number {
+    return rustyscript.functions.transaction_execute(queryStr, params);
   }
 
   public commit(): void {
@@ -745,14 +754,6 @@ export function transaction<T>(f: (tx: Transaction) => T): T {
     rustyscript.functions.transaction_rollback();
     throw e;
   }
-}
-
-/// Executes given query against SQLite database.
-export async function execute(
-  queryStr: string,
-  params: unknown[],
-): Promise<number> {
-  return await rustyscript.async_functions.execute(queryStr, params);
 }
 
 export type ParsedPath = {
